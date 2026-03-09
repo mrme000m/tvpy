@@ -8,6 +8,7 @@ This file contains Python equivalents of the JavaScript examples from tvjs/examp
 - FetchHistoricalData: Fetch historical OHLCV data and save to CSV
 - ListSavedPineScripts: List saved/private Pine scripts
 - Search: Search for markets and indicators
+- PrivateScriptMultiTimeframe: Run private scripts with custom inputs on multiple timeframes
 
 Usage:
     python examples.py [example_name] [--session SESSION] [--signature SIGNATURE]
@@ -19,6 +20,8 @@ Examples:
     python examples.py fetch_historical_data --count 500
     python examples.py list_saved_scripts --json
     python examples.py search
+    python examples.py private_multi_tf
+    python examples.py private_multi_tf --indicator "My Strategy" --timeframes "15,60,240" --samples "50,100,200"
     python examples.py all  # Run all examples sequentially
 """
 
@@ -773,7 +776,7 @@ async def search_example():
     markets = await search_market_v3('BINANCE:')
     print(f"Found {len(markets)} markets:")
     for m in markets[:5]:  # Show first 5
-        print(f"  - {m['id']}: {m['description']}")
+            print(f"  - {m['id']}: {m['description']}")
     
     # Search for indicators (matches JS: TradingView.searchIndicator('RSI'))
     print("\nSearching for RSI indicators...")
@@ -783,6 +786,256 @@ async def search_example():
         print(f"  - {i['name']} ({i['id']}) - {i['access']}")
     
     print("\nSearch example completed.\n")
+
+
+# ============================================================================
+# EXAMPLE 7: PrivateScriptMultiTimeframe
+# ============================================================================
+
+async def private_script_multi_timeframe_example(
+    indicator_name: str = None,
+    timeframes: List[str] = None,
+    sample_sizes: List[int] = None
+):
+    """
+    PrivateScriptMultiTimeframe Example - Run private scripts with custom inputs
+    on multiple timeframes with varied sample sizes.
+    
+    This example demonstrates:
+    - Loading a private indicator with full metadata
+    - Setting custom input parameters
+    - Running the same indicator on multiple timeframes
+    - Collecting different sample sizes for each timeframe
+    - Comparing results across timeframes
+    - Sequential processing to respect free tier limits
+    
+    Usage:
+        python examples.py private_multi_tf
+        python examples.py private_multi_tf --indicator "My Strategy"
+        python examples.py private_multi_tf --timeframes "15,60,240" --samples "50,100,200"
+    
+    Args:
+        indicator_name: Name of the private indicator to run (default: first available)
+        timeframes: List of timeframes to test (default: ['15', '60', '240'])
+        sample_sizes: List of sample sizes for each timeframe (default: [50, 100, 200])
+    """
+    print("=" * 60)
+    print("EXAMPLE: Private Script Multi-Timeframe Analysis")
+    print("=" * 60)
+    
+    config = load_config()
+    require_auth(config['session'], config['signature'], 'private_multi_tf')
+    
+    # Default configurations
+    timeframes = timeframes or ['15', '60', '240']
+    sample_sizes = sample_sizes or [50, 100, 200]
+    
+    if len(timeframes) != len(sample_sizes):
+        print("Error: timeframes and sample_sizes must have the same length")
+        return
+    
+    print(f"\nConfiguration:")
+    print(f"  Timeframes: {timeframes}")
+    print(f"  Sample sizes: {sample_sizes}")
+    
+    # Fetch private indicators
+    print("\nFetching private indicators...")
+    indic_list = await get_private_indicators(config['session'], config['signature'])
+    
+    if not indic_list:
+        print("No private indicators found for this account.")
+        return
+    
+    # Select indicator
+    target_indic = None
+    if indicator_name:
+        for ind in indic_list:
+            if indicator_name.lower() in ind['name'].lower():
+                target_indic = ind
+                break
+        if not target_indic:
+            print(f"Indicator '{indicator_name}' not found. Using first available.")
+            target_indic = indic_list[0]
+    else:
+        target_indic = indic_list[0]
+    
+    print(f"\nSelected indicator: {target_indic['name']} ({target_indic['id']})")
+    
+    # Load full indicator with metadata
+    print("  Loading indicator metadata...")
+    private_indic = await target_indic['get']()
+    
+    print(f"  Description: {private_indic.description or 'N/A'}")
+    print(f"  Version: {private_indic.pine_version}")
+    print(f"  Inputs: {len(private_indic.inputs)}")
+    
+    # Show available inputs
+    if private_indic.inputs:
+        print("\n  Available inputs:")
+        for inp_id, inp_data in list(private_indic.inputs.items())[:5]:  # Show first 5
+            if not inp_id.startswith('__') and inp_id not in ['pineFeatures']:
+                default_val = inp_data.get('value', 'N/A')
+                print(f"    - {inp_data.get('name', inp_id)}: {default_val}")
+    
+    # Create client
+    client = Client(
+        token=config['session'],
+        signature=config['signature'],
+    )
+    
+    await client.connect()
+    
+    # Results storage
+    results = {}
+    
+    try:
+        # Process each timeframe sequentially
+        for tf, sample_size in zip(timeframes, sample_sizes):
+            print(f"\n{'='*50}")
+            print(f"Timeframe: {tf}, Sample Size: {sample_size}")
+            print('='*50)
+            
+            # Create fresh chart for each timeframe
+            chart = client.Session.Chart()
+            
+            # Set market with appropriate range
+            chart.set_market('BINANCE:BTCUSDT', timeframe=tf, range=sample_size)
+            
+            # Clone the indicator for this run (to avoid state conflicts)
+            from tradingview import PineIndicator
+            indic_clone = PineIndicator({
+                'pineId': private_indic.pine_id,
+                'pineVersion': private_indic.pine_version,
+                'description': private_indic.description,
+                'shortDescription': private_indic.short_description,
+                'inputs': {k: dict(v) for k, v in private_indic.inputs.items()},
+                'plots': dict(private_indic.plots),
+                'script': private_indic.script,
+            })
+            
+            # Example: Modify some inputs if they exist
+            input_modified = False
+            for inp_id, inp_data in indic_clone.inputs.items():
+                # Example: Change length parameters based on timeframe
+                if inp_data.get('name', '').lower() in ['length', 'period', 'lookback']:
+                    if tf == '15':
+                        new_val = 14  # Short for 15m
+                    elif tf == '60':
+                        new_val = 20  # Medium for 1h
+                    else:
+                        new_val = 50  # Long for 4h+
+                    
+                    try:
+                        old_val = inp_data.get('value')
+                        indic_clone.set_option(inp_id, new_val)
+                        print(f"  Modified input '{inp_data.get('name')}': {old_val} -> {new_val}")
+                        input_modified = True
+                    except Exception as e:
+                        print(f"  Could not modify input '{inp_data.get('name')}': {e}")
+            
+            if not input_modified:
+                print("  Using default input values")
+            
+            # Create study
+            study = chart.Study(indic_clone)
+            
+            # Track completion
+            data_received = False
+            tf_results = {
+                'timeframe': tf,
+                'sample_size': sample_size,
+                'periods': [],
+                'strategy_report': None,
+            }
+            
+            def make_update_callback(ind, container):
+                def on_update(changes):
+                    nonlocal data_received
+                    if data_received:
+                        return
+                    
+                    if ind.periods:
+                        container['periods'] = ind.periods.copy()
+                        container['strategy_report'] = dict(ind.strategy_report)
+                        data_received = True
+                        
+                        print(f"  ✓ Received {len(ind.periods)} periods")
+                        if ind.strategy_report.get('trades'):
+                            print(f"  ✓ Strategy has {len(ind.strategy_report['trades'])} trades")
+                        
+                        # Remove study immediately
+                        ind.remove()
+                
+                return on_update
+            
+            study.on_update(make_update_callback(study, tf_results))
+            
+            # Wait for data
+            for i in range(15):  # Max 15 seconds per timeframe
+                await asyncio.sleep(1)
+                if data_received:
+                    break
+            
+            if not data_received:
+                print(f"  ✗ No data received within timeout")
+                study.remove()
+            
+            # Store results
+            results[tf] = tf_results
+            
+            # Delete chart before next iteration
+            chart.delete()
+            
+            # Small delay between timeframes
+            await asyncio.sleep(0.5)
+        
+        # Summary
+        print(f"\n{'='*60}")
+        print("SUMMARY - Multi-Timeframe Analysis")
+        print('='*60)
+        
+        for tf, data in results.items():
+            periods_count = len(data['periods'])
+            trades_count = len(data['strategy_report'].get('trades', [])) if data['strategy_report'] else 0
+            print(f"\n  {tf}:")
+            print(f"    Periods collected: {periods_count}/{data['sample_size']}")
+            print(f"    Strategy trades: {trades_count}")
+            
+            if data['periods']:
+                latest = data['periods'][0]
+                print(f"    Latest value: {latest.get('Plot', latest.get('plot_0', 'N/A'))}")
+        
+        # Cross-timeframe comparison
+        print(f"\n{'='*60}")
+        print("Cross-Timeframe Comparison")
+        print('='*60)
+        
+        # Find common plot values across timeframes
+        plot_keys = set()
+        for data in results.values():
+            if data['periods']:
+                plot_keys.update(data['periods'][0].keys())
+        
+        plot_keys.discard('$time')
+        
+        if plot_keys:
+            print(f"\n  Available plot values: {', '.join(list(plot_keys)[:5])}")
+            for plot_key in list(plot_keys)[:3]:  # Show first 3 plots
+                print(f"\n  {plot_key}:")
+                for tf, data in results.items():
+                    if data['periods'] and plot_key in data['periods'][0]:
+                        value = data['periods'][0][plot_key]
+                        print(f"    {tf}: {value}")
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    finally:
+        await client.end()
+    
+    print("\nPrivate Script Multi-Timeframe example completed.\n")
 
 
 # ============================================================================
@@ -816,6 +1069,13 @@ async def run_all_examples():
             
             # ListSavedPineScripts
             await list_saved_scripts_example(json_output=False, details=True)
+            
+            # PrivateScriptMultiTimeframe (quick version)
+            print("\nRunning Private Multi-Timeframe example (quick version)...")
+            await private_script_multi_timeframe_example(
+                timeframes=['60'],
+                sample_sizes=[50]
+            )
         else:
             print("Skipping authenticated examples (no SESSION/SIGNATURE provided)\n")
             
@@ -838,6 +1098,7 @@ def main():
         print("  fetch_historical_data     - Fetch historical data to CSV")
         print("  list_saved_scripts        - List saved Pine scripts")
         print("  search                    - Search markets and indicators")
+        print("  private_multi_tf          - Private script with custom inputs on multiple timeframes")
         print("  all                       - Run all examples")
         print("\nOptions:")
         print("  --session SESSION         - Override SESSION cookie")
@@ -845,6 +1106,9 @@ def main():
         print("  --count N                 - Number of bars to fetch (for fetch_historical_data)")
         print("  --json                    - JSON output (for list_saved_scripts)")
         print("  --details                 - Show detailed info (for list_saved_scripts)")
+        print("  --indicator NAME          - Indicator name (for private_multi_tf)")
+        print("  --timeframes TFS          - Comma-separated timeframes (for private_multi_tf)")
+        print("  --samples SIZES           - Comma-separated sample sizes (for private_multi_tf)")
         sys.exit(0)
     
     example_name = argv[0]
@@ -864,6 +1128,33 @@ def main():
     # Check for --details flag
     details = '--details' in argv
     
+    # Check for --indicator flag (for private_multi_tf)
+    indicator_name = None
+    if '--indicator' in argv:
+        try:
+            idx = argv.index('--indicator')
+            indicator_name = argv[idx + 1]
+        except:
+            pass
+    
+    # Check for --timeframes flag (for private_multi_tf)
+    timeframes = None
+    if '--timeframes' in argv:
+        try:
+            idx = argv.index('--timeframes')
+            timeframes = argv[idx + 1].split(',')
+        except:
+            pass
+    
+    # Check for --samples flag (for private_multi_tf)
+    sample_sizes = None
+    if '--samples' in argv:
+        try:
+            idx = argv.index('--samples')
+            sample_sizes = [int(s) for s in argv[idx + 1].split(',')]
+        except:
+            pass
+    
     async def run():
         if example_name == 'simple_chart':
             await simple_chart_example()
@@ -877,6 +1168,12 @@ def main():
             await list_saved_scripts_example(json_output=json_output, details=details)
         elif example_name == 'search':
             await search_example()
+        elif example_name == 'private_multi_tf':
+            await private_script_multi_timeframe_example(
+                indicator_name=indicator_name,
+                timeframes=timeframes,
+                sample_sizes=sample_sizes
+            )
         elif example_name == 'all':
             await run_all_examples()
         else:

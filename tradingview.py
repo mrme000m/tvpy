@@ -1890,6 +1890,14 @@ class ChartSession:
             error = SessionError(f"Critical error: {name}", description)
             self._trigger_event("error", error)
             self._trigger_event("event", "error", error)
+            return
+        
+        # Route study errors to the appropriate study listener
+        if packet["type"] == "study_error":
+            study_id = packet["data"][1] if len(packet["data"]) > 1 else None
+            if study_id and study_id in self._study_listeners:
+                self._study_listeners[study_id](packet)
+            return
     
     def _on_replay_data(self, packet):
         """Handle incoming replay data."""
@@ -2218,8 +2226,74 @@ class ChartSession:
             "send": self._client.send
         }, indicator)
     
+    def get_studies(self) -> List[Dict[str, str]]:
+        """Get list of active studies on this chart.
+        
+        Returns:
+            List of dicts with 'id' key for each active study.
+            Note: Study names are not tracked by the server, only IDs.
+            
+        Example:
+            >>> chart.get_studies()
+            [{'id': 'st_abc123'}, {'id': 'st_def456'}]
+        """
+        return [{"id": study_id} for study_id in self._study_listeners.keys()]
+    
+    def remove_study(self, study_id: str) -> bool:
+        """Remove a specific study by ID.
+        
+        Args:
+            study_id: The study ID (e.g., 'st_abc123')
+            
+        Returns:
+            True if study was found and removed, False otherwise.
+            
+        Example:
+            >>> chart.remove_study('st_abc123')
+            True
+        """
+        if study_id not in self._study_listeners:
+            return False
+        
+        self._client.send("remove_study", [
+            self._chart_session_id,
+            study_id
+        ])
+        del self._study_listeners[study_id]
+        return True
+    
+    async def remove_all_studies(self) -> int:
+        """Remove all active studies from this chart.
+        
+        This is useful for free tier users who need to clear studies
+        before adding new ones.
+        
+        Returns:
+            Number of studies removed.
+            
+        Example:
+            >>> removed = await chart.remove_all_studies()
+            >>> print(f"Removed {removed} studies")
+            Removed 3 studies
+        """
+        study_ids = list(self._study_listeners.keys())
+        
+        for study_id in study_ids:
+            self._client.send("remove_study", [
+                self._chart_session_id,
+                study_id
+            ])
+            if study_id in self._study_listeners:
+                del self._study_listeners[study_id]
+            await asyncio.sleep(0.1)  # Brief pause between removals
+        
+        return len(study_ids)
+    
     def delete(self):
-        """Delete the chart session."""
+        """Delete the chart session.
+        
+        This automatically removes all studies associated with this chart.
+        """
         if self._replay_mode:
             self._client.send("replay_delete_session", [self._replay_session_id])
         self._client.send("chart_delete_session", [self._chart_session_id])
